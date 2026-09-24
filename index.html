@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>粒子星球 — 手势交互</title>
+<style>
+  :root{--bg:#010108;--pnl:rgba(10,10,24,0.9);--tx:#c0c0d8;--ac:#ff8844}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);overflow:hidden;font:13px/1.4 'Segoe UI',system-ui,sans-serif;height:100vh;width:100vw;user-select:none;-webkit-user-select:none}
+  #three-container{position:fixed;inset:0;z-index:1}
+  #three-container canvas{display:block}
+  #cam-video{position:fixed;top:0;left:0;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:0}
+  #fs-btn{position:fixed;top:14px;right:14px;z-index:20;width:42px;height:42px;border-radius:12px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.65);font-size:20px;cursor:pointer;backdrop-filter:blur(10px);transition:all 0.25s;display:flex;align-items:center;justify-content:center}
+  #fs-btn:hover{background:rgba(255,255,255,0.14);color:#fff}
+
+  #panel{position:fixed;right:14px;bottom:14px;z-index:20;width:220px;background:var(--pnl);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-radius:14px;border:1px solid rgba(255,255,255,0.08);padding:14px;color:var(--tx);box-shadow:0 8px 32px rgba(0,0,0,0.5);font-size:11px;transition:opacity 0.35s}
+  #panel.dim{opacity:0.2}#panel.dim:hover{opacity:1}
+  #panel h3{margin:0 0 8px;font-size:13px;font-weight:600;color:#fff}
+  #gesture-name{display:block;font-size:13px;font-weight:700;margin:4px 0;transition:color 0.3s}
+  #fps-display{font-size:10px;color:#777}#fps-display.warn{color:#f84}
+  #panel label{display:block;margin:6px 0 1px;color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.4px}
+  #panel input[type=range]{width:100%;margin:1px 0 5px;accent-color:var(--ac)}
+  .val{color:#aaa;font-size:10px}
+  .btn-sm{padding:5px 12px;border:1px solid rgba(255,255,255,0.14);border-radius:12px;background:rgba(255,255,255,0.05);color:var(--tx);cursor:pointer;font-size:11px;transition:all 0.2s}
+  .btn-sm:hover{background:rgba(255,255,255,0.12)}
+  .btn-sm.full{width:100%;margin-top:6px}
+
+  @media(max-width:768px){#panel{width:180px;right:4px;bottom:4px;padding:10px;font-size:10px}#fs-btn{width:36px;height:36px;top:8px;right:8px}}
+</style>
+</head>
+<body>
+
+<div id="three-container"></div>
+<video id="cam-video" autoplay playsinline muted></video>
+<button id="fs-btn" title="全屏">⛶</button>
+
+<div id="panel">
+  <h3>✨ 粒子星球</h3>
+  <span id="gesture-name" style="color:#888">待机中</span>
+  <span id="fps-display">FPS --</span>
+  <label>粒子总数 <span class="val" id="v-count">24000</span></label>
+  <input type="range" id="sld-count" min="5000" max="40000" value="24000" step="1000">
+  <label>扩张幅度 <span class="val" id="v-expand">1.0</span></label>
+  <input type="range" id="sld-expand" min="0.5" max="2.5" value="1.0" step="0.1">
+  <button class="btn-sm full" id="btn-color">🎨 切换色调</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<script>
+// ============================================================
+// 发光贴图
+// ============================================================
+function glowTex(color) {
+  const s=64,c=document.createElement('canvas');c.width=s;c.height=s;
+  const ctx=c.getContext('2d');
+  const g=ctx.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  g.addColorStop(0,color||'rgba(255,255,255,1)');
+  g.addColorStop(0.06,color||'rgba(255,255,255,0.95)');
+  g.addColorStop(0.25,'rgba(255,255,255,0.45)');
+  g.addColorStop(0.55,'rgba(255,255,255,0.08)');
+  g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,s,s);
+  return new THREE.CanvasTexture(c);
+}
+const texWarm=glowTex('rgba(255,200,100,0.9)');
+const texCool=glowTex('rgba(120,200,255,0.9)');
+const texWhite=glowTex();
+
+// ============================================================
+// Three.js 场景
+// ============================================================
+const container=document.getElementById('three-container');
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth,window.innerHeight);
+container.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x010108);
+scene.fog=new THREE.FogExp2(0x010108,0.00004);
+
+const camera=new THREE.PerspectiveCamera(55,window.innerWidth/window.innerHeight,0.3,40);
+camera.position.set(0,0.2,7.5);camera.lookAt(0,0,0);
+
+// 背景星空
+(function(){
+  const g=new THREE.BufferGeometry();
+  const p=new Float32Array(800*3);
+  for(let i=0;i<800;i++){p[i*3]=(Math.random()-0.5)*18;p[i*3+1]=(Math.random()-0.5)*12;p[i*3+2]=-2-Math.random()*8;}
+  g.setAttribute('position',new THREE.BufferAttribute(p,3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({map:texWhite,color:0xffffff,size:0.03,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.4})));
+})();
+
+// ============================================================
+// 粒子层
+// ============================================================
+const MAX_PER_LAYER=15000;
+function createLayer(count,tex,materialOpts){
+  const pos=new Float32Array(MAX_PER_LAYER*3);
+  const col=new Float32Array(MAX_PER_LAYER*3);
+  const ref=new Float32Array(MAX_PER_LAYER*3); // 参考位置（球面/环面坐标）
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(col,3));
+  const mat=new THREE.PointsMaterial({map:tex,size:0.08,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.85,vertexColors:true,...materialOpts});
+  const pts=new THREE.Points(geo,mat);
+  geo.setDrawRange(0,count);
+  pts.userData={pos,col,ref,active:count};
+  return pts;
+}
+
+// 6 个层
+const layers=[
+  createLayer(8000,texWarm,{size:0.06,opacity:0.9}),   // 0: 核心
+  createLayer(5000,texWarm,{size:0.07,opacity:0.7}),   // 1: 内壳
+  createLayer(4000,texCool,{size:0.08,opacity:0.55}),  // 2: 外壳
+  createLayer(3500,texCool,{size:0.05,opacity:0.45}),  // 3: 外晕
+  createLayer(3000,texWhite,{size:0.04,opacity:0.5}),  // 4: 光环1
+  createLayer(2500,texWhite,{size:0.04,opacity:0.4}),  // 5: 光环2
+];
+layers.forEach(l=>scene.add(l));
+
+// 扩张指示环 — 视觉反馈当前手势状态
+const ringTex=(()=>{
+  const s=128,c=document.createElement('canvas');c.width=s;c.height=s;
+  const ctx=c.getContext('2d');
+  ctx.beginPath();ctx.arc(s/2,s/2,s/2-6,0,Math.PI*2);
+  const g=ctx.createRadialGradient(s/2,s/2,s/2-16,s/2,s/2,s/2);
+  g.addColorStop(0,'rgba(255,255,255,0)');g.addColorStop(0.75,'rgba(255,255,255,0.03)');
+  g.addColorStop(0.88,'rgba(255,255,255,0.45)');g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.strokeStyle=g;ctx.lineWidth=3;ctx.stroke();
+  return new THREE.CanvasTexture(c);
+})();
+const stateRing=new THREE.Sprite(new THREE.SpriteMaterial({map:ringTex,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.5,color:0x888888}));
+stateRing.scale.set(6,6,1);stateRing.position.z=0;
+scene.add(stateRing);
+
+// 核心光晕（捏合时变亮）
+const coreGlow=new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex('rgba(255,180,60,0.8)'),blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.15,color:0xffaa44}));
+coreGlow.scale.set(3.5,3.5,1);coreGlow.position.z=0;
+scene.add(coreGlow);
+
+// 指向喷射粒子系统
+const SPRAY_MAX=500;
+const sprayPos=new Float32Array(SPRAY_MAX*3);
+const sprayCol=new Float32Array(SPRAY_MAX*3);
+const sprayLife=new Float32Array(SPRAY_MAX);
+const sprayGeo=new THREE.BufferGeometry();
+sprayGeo.setAttribute('position',new THREE.BufferAttribute(sprayPos,3));
+sprayGeo.setAttribute('color',new THREE.BufferAttribute(sprayCol,3));
+const sprayMat=new THREE.PointsMaterial({map:texWarm,size:0.06,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.8,vertexColors:true});
+const sprayMesh=new THREE.Points(sprayGeo,sprayMat);
+sprayGeo.setDrawRange(0,0);
+scene.add(sprayMesh);
+let sprayActive=0;
+
+function setLayerCount(layerIdx,count){
+  const l=layers[layerIdx];
+  count=Math.min(count,MAX_PER_LAYER);
+  l.userData.active=count;
+  l.geometry.setDrawRange(0,count);
+}
+
+function totalParticles(){
+  return layers.reduce((s,l)=>s+l.userData.active,0);
+}
+
+// 初始化各层粒子参考坐标
+function initLayerRef(layerIdx){
+  const l=layers[layerIdx];
+  const ref=l.userData.ref;
+  const n=MAX_PER_LAYER;
+  switch(layerIdx){
+    case 0: // 核心：体积球 ×1.3
+      for(let i=0;i<n;i++){
+        const r=1.7*Math.pow(Math.random(),1/3);
+        const th=Math.random()*Math.PI*2;
+        const ph=Math.acos(2*Math.random()-1);
+        ref[i*3]=r*Math.sin(ph)*Math.cos(th);
+        ref[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+        ref[i*3+2]=r*Math.cos(ph);
+      }break;
+    case 1: // 内壳：球面 ×1.3
+      for(let i=0;i<n;i++){
+        const th=Math.random()*Math.PI*2;
+        const ph=Math.acos(2*Math.random()-1);
+        const r=2.2+(Math.random()-0.5)*0.6;
+        ref[i*3]=r*Math.sin(ph)*Math.cos(th);
+        ref[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+        ref[i*3+2]=r*Math.cos(ph);
+      }break;
+    case 2: // 外壳 ×1.3
+      for(let i=0;i<n;i++){
+        const th=Math.random()*Math.PI*2;
+        const ph=Math.acos(2*Math.random()-1);
+        const r=3.0+(Math.random()-0.5)*0.7;
+        ref[i*3]=r*Math.sin(ph)*Math.cos(th);
+        ref[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+        ref[i*3+2]=r*Math.cos(ph);
+      }break;
+    case 3: // 外晕 ×1.3
+      for(let i=0;i<n;i++){
+        const th=Math.random()*Math.PI*2;
+        const ph=Math.acos(2*Math.random()-1);
+        const r=3.9+(Math.random()-0.5)*0.9;
+        ref[i*3]=r*Math.sin(ph)*Math.cos(th);
+        ref[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+        ref[i*3+2]=r*Math.cos(ph);
+      }break;
+    case 4: // 3D星环（环面/torus）：从前围到后
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2;       // 绕Y轴角度
+        const R=2.6+Math.random()*1.6;          // 环半径
+        const tr=0.2+Math.random()*0.45;        // 管截面半径
+        const b=Math.random()*Math.PI*2;        // 管截面角度
+        ref[i*3]=Math.cos(a)*(R+Math.cos(b)*tr);
+        ref[i*3+1]=Math.sin(b)*tr;
+        ref[i*3+2]=Math.sin(a)*(R+Math.cos(b)*tr);
+      }break;
+    case 5: // 3D星环2（更大半径的环面）
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2;
+        const R=3.2+Math.random()*2.0;
+        const tr=0.15+Math.random()*0.4;
+        const b=Math.random()*Math.PI*2;
+        ref[i*3]=Math.cos(a)*(R+Math.cos(b)*tr);
+        ref[i*3+1]=Math.sin(b)*tr;
+        ref[i*3+2]=Math.sin(a)*(R+Math.cos(b)*tr);
+      }break;
+  }
+}
+layers.forEach((_,i)=>initLayerRef(i));
+
+// 爱心参考坐标（层0核心+层1内壳的变形目标）
+function initHeartRef(li){
+  const l=layers[li];const alt=new Float32Array(MAX_PER_LAYER*3);l.userData.altRef=alt;
+  for(let i=0;i<MAX_PER_LAYER;i++){
+    const t=Math.random()*Math.PI*2;
+    const hx=16*Math.pow(Math.sin(t),3)*0.104,hy=(13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t))*0.104;
+    if(li===0){const r=Math.pow(Math.random(),1/3);alt[i*3]=hx*r+(Math.random()-0.5)*0.13;alt[i*3+1]=hy*r+(Math.random()-0.5)*0.13;alt[i*3+2]=(Math.random()-0.5)*0.9*r;}
+    else{const s=0.8+Math.random()*0.3;alt[i*3]=hx*s+(Math.random()-0.5)*0.16;alt[i*3+1]=hy*s+(Math.random()-0.5)*0.16;alt[i*3+2]=(Math.random()-0.5)*0.65;}
+  }
+}
+initHeartRef(0);initHeartRef(1);
+let morphTarget=0,morphCurrent=0;
+let distScaleTarget=1.0,distScaleCurrent=1.0; // 手距离缩放
+// 星球位置（跟随手指移动）
+let planetOX=0,planetOY=0,planetTX=0,planetTY=0;
+let _lastPointTime=0; // 最后一次食指跟随时间，用于5秒自动回中
+
+// ============================================================
+// 颜色计算：基于到中心距离的渐变
+// ============================================================
+function distColor(x,y,z){
+  const d=Math.sqrt(x*x+y*y+z*z);
+  // 核心(0-1.5): 暖金黄 (hue 30-45)
+  // 过渡(1.5-2.5): 暖→冷
+  // 外层(2.5+): 冷蓝青 (hue 190-220)
+  let hue;
+  if(d<1.3) hue=30+(d/1.3)*20;
+  else if(d<2.5) hue=50+(d-1.3)/(1.2)*160;
+  else hue=210+Math.min(30,(d-2.5)*20);
+  const sat=0.65+Math.random()*0.15;
+  const light=0.4+d*0.08;
+  return new THREE.Color().setHSL((hue%360)/360,sat,Math.min(0.8,light));
+}
+
+function updateLayerColors(layerIdx){
+  const l=layers[layerIdx];
+  const pos=l.userData.pos;
+  const col=l.userData.col;
+  const n=l.userData.active;
+  for(let i=0;i<n;i++){
+    const c=distColor(pos[i*3],pos[i*3+1],pos[i*3+2]);
+    col[i*3]=c.r;col[i*3+1]=c.g;col[i*3+2]=c.b;
+  }
+  l.geometry.attributes.color.needsUpdate=true;
+}
+
+// ============================================================
+// 色彩主题切换
+// ============================================================
+let colorTheme=0;
+const themes=[
+  {name:'暖金核心',core:[30,45],outer:[195,225]},
+  {name:'紫罗兰',core:[270,300],outer:[180,210]},
+  {name:'翡翠',core:[140,170],outer:[200,230]},
+  {name:'烈焰',core:[0,20],outer:[25,50]},
+];
+function switchTheme(){
+  colorTheme=(colorTheme+1)%themes.length;
+}
+
+// 根据当前主题取色
+function themedColor(x,y,z){
+  const d=Math.sqrt(x*x+y*y+z*z);
+  const t=themes[colorTheme];
+  let hue;
+  if(d<1.3) hue=t.core[0]+(d/1.3)*(t.core[1]-t.core[0]);
+  else if(d<2.5) hue=t.core[1]+(d-1.3)/(1.2)*(t.outer[0]-t.core[1]);
+  else hue=t.outer[0]+Math.min(30,(d-2.5)*(t.outer[1]-t.outer[0])/2);
+  const sat=0.6+Math.random()*0.2;
+  const light=0.35+d*0.1;
+  return new THREE.Color().setHSL((hue%360)/360,sat,Math.min(0.85,light));
+}
+
+// ============================================================
+// 手势状态
+// ============================================================
+let gest={
+  name:'待机',color:'#888',
+  active:false,
+  palmX:0,palmY:0,
+  pinching:false,
+  fisting:false,
+  exploding:false,
+  pointing:false,pointDir:{x:0,y:0},pointTip:{x:0,y:0},
+};
+
+// ============================================================
+// 动画参数
+// ============================================================
+let expandTarget=1.0;   // 手势驱动的扩张目标
+let expandCurrent=1.0;  // 平滑插值后的当前扩张
+let rotSpeed=0.25;      // 基础旋转速度
+let rotTarget=0.45;
+
+// ============================================================
+// 更新所有层
+// ============================================================
+function updateAllLayers(time,dt){
+  // 平滑插值
+  expandCurrent+=(expandTarget-expandCurrent)*0.04;
+  rotSpeed+=(rotTarget-rotSpeed)*0.05;
+  morphCurrent+=(morphTarget-morphCurrent)*0.03; // 爱心变形
+  distScaleCurrent+=(distScaleTarget-distScaleCurrent)*0.15; // 距离缩放（更快响应）
+
+  const baseRotY=time*rotSpeed;
+  const baseRotX=time*rotSpeed*0.4;
+
+  for(let li=0;li<layers.length;li++){
+    const l=layers[li];
+    const ref=l.userData.ref;
+    const pos=l.userData.pos;
+    const col=l.userData.col;
+    const n=l.userData.active;
+
+    // 每层独立旋转参数
+    let rotY=baseRotY,rotX=baseRotX;
+    if(li===0){rotY*=0.7;rotX*=0.5;}           // 核心慢
+    else if(li===1){rotY*=0.9;}                  // 内壳
+    else if(li===2){rotY*=1.2;rotX*=0.7;}        // 外壳快
+    else if(li===3){rotY*=0.6;rotX*=0.8;}        // 外晕
+    else if(li===4){rotY*=1.6;rotX=0;}           // 光环快
+    else if(li===5){rotY*=-1.1;rotX=0.3;}        // 光环反向
+    // 爱心模式：核心+内壳完全不转，始终正面朝摄像机
+    if(morphCurrent>0.01&&(li===0||li===1)){rotX=0;rotY=0;}
+
+    // 3D星环无需额外倾斜，旋转自然展现立体
+    let tiltX=0,tiltZ=0;
+
+    // 呼吸效果
+    const breathe=1+Math.sin(time*1.3)*0.08+Math.sin(time*2.1)*0.05;
+    // 银河模式：外层环扩张 2.5-3 倍
+    const galExp=(li===4||li===5)&&l.userData.galaxy?2.5+Math.sin(time*3)*0.4:1;
+    const expand=expandCurrent*breathe*galExp*distScaleCurrent;
+
+    // 旋转矩阵分量
+    const cosY=Math.cos(rotY),sinY=Math.sin(rotY);
+    const cosX=Math.cos(rotX),sinX=Math.sin(rotX);
+
+    // 爱心变形（层0+1）
+    const morph=(li===0||li===1)?morphCurrent:0;
+    const alt=l.userData.altRef;
+
+    for(let i=0;i<n;i++){
+      let rx=ref[i*3],ry=ref[i*3+1],rz=ref[i*3+2];
+      if(morph>0.001&&alt){
+        rx=rx+(alt[i*3]-rx)*morph;
+        ry=ry+(alt[i*3+1]-ry)*morph;
+        rz=rz+(alt[i*3+2]-rz)*morph;
+      }
+
+      // 缩放
+      let sx=rx*expand,sy=ry*expand,sz=rz*expand;
+
+      // Y轴旋转
+      let tx=sx*cosY-sz*sinY;
+      let tz=sx*sinY+sz*cosY;
+      let ty=sy;
+
+      // X轴旋转
+      const ty2=ty*cosX-tz*sinX;
+      const tz2=ty*sinX+tz*cosX;
+
+      // 光环额外倾斜
+      let fx=tx,fy=ty2,fz=tz2;
+      if(tiltX!==0||tiltZ!==0){
+        fy=fy*Math.cos(tiltX)-fz*Math.sin(tiltX);
+        fz=ty2*Math.sin(tiltX)+tz2*Math.cos(tiltX);
+        fx=tx*Math.cos(tiltZ)-fy*Math.sin(tiltZ);
+      }
+
+      // 爱心模式：粒子微动（呼吸波），不破坏形状
+      if(morphCurrent>0.01&&(li===0||li===1)){
+        fx+=Math.sin(time*2.8+i*0.07)*0.04*morphCurrent;
+        fy+=Math.cos(time*3.2+i*0.09)*0.04*morphCurrent;
+        fz+=Math.cos(time*2.5+i*0.11)*0.03*morphCurrent;
+      }
+
+      pos[i*3]=fx+planetOX;
+      pos[i*3+1]=fy+planetOY;
+      pos[i*3+2]=fz;
+
+      // 光环用独立颜色（蓝白），其余按距离渐变
+      if(Math.floor(time*60)%8===0){
+        if(li===4||li===5){
+          const rc=new THREE.Color().setHSL(0.55+Math.random()*0.08,0.7,0.55+Math.random()*0.25);
+          col[i*3]=rc.r;col[i*3+1]=rc.g;col[i*3+2]=rc.b;
+        }else{
+          const c=themedColor(fx,fy,fz);
+          col[i*3]=c.r;col[i*3+1]=c.g;col[i*3+2]=c.b;
+        }
+      }
+    }
+    l.geometry.attributes.position.needsUpdate=true;
+    if(Math.floor(time*60)%8===0)l.geometry.attributes.color.needsUpdate=true;
+  }
+}
+
+// ============================================================
+// MediaPipe 手势
+// ============================================================
+const video=document.getElementById('cam-video');
+let hands=null,camInst=null;
+
+function isFingerUp(lm,tip,mcp){
+  return Math.hypot(lm[tip].x-lm[0].x,lm[tip].y-lm[0].y)>Math.hypot(lm[mcp].x-lm[0].x,lm[mcp].y-lm[0].y)*1.12;
+}
+function isThumbUp(lm){
+  return Math.hypot(lm[4].x-lm[5].x,lm[4].y-lm[5].y)>Math.hypot(lm[3].x-lm[5].x,lm[3].y-lm[5].y)*1.06;
+}
+function pinchDist(lm){return Math.hypot(lm[4].x-lm[8].x,lm[4].y-lm[8].y);}
+
+let stableCnt=-1,stableSince=0;
+let lastPinch=false;
+
+function onHandResults(r){
+  const now=performance.now();
+  if(!r.multiHandLandmarks||r.multiHandLandmarks.length===0){
+    gest.active=false;gest.name='待机';gest.color='#888';
+    expandTarget=1.0;rotTarget=0.45;
+    stableCnt=-1;stableSince=0;lastPinch=false;
+    return;
+  }
+  gest.active=true;
+  const lm=r.multiHandLandmarks[0];
+
+  // 手掌位置映射
+  const pcx=(lm[0].x+lm[9].x)/2,pcy=(lm[0].y+lm[9].y)/2;
+  gest.palmX=(0.5-pcx)*4;
+  gest.palmY=(0.5-pcy)*3;
+
+  // 手指逐个检测
+  const idxUp=isFingerUp(lm,8,5),midUp=isFingerUp(lm,12,9);
+  const rngUp=isFingerUp(lm,16,13),pnkUp=isFingerUp(lm,20,17),thbUp=isThumbUp(lm);
+  const cnt=[idxUp,midUp,rngUp,pnkUp,thbUp].filter(Boolean).length;
+  if(cnt!==stableCnt){stableCnt=cnt;stableSince=now;}
+  const held=now-stableSince;
+
+  // 捏合
+  const pd=pinchDist(lm);
+  gest.pinching=pd<0.045;
+  lastPinch=gest.pinching;
+
+  // ── 手势映射 ──
+  const prevName=gest.name;
+  const isTwo=idxUp&&midUp&&!rngUp&&!pnkUp;         // ✌ 2指
+
+  // 重置每帧状态
+  layers[4].userData.galaxy=0;layers[5].userData.galaxy=0;
+
+  // 所有手势都跟随手部位置移动星球
+  planetTX=(0.5-pcx)*9;
+  planetTY=(0.5-pcy)*6;
+  _lastPointTime=now; // 有手就重置自动回中计时
+
+  // 距离缩放：连续线性映射，手越近星球越大
+  distScaleTarget=0.5+pcy*1.3; // pcy=0(远)→0.5倍, pcy=1(近)→1.8倍
+
+  if(cnt>=4&&held>220){
+    // 🖐 五指张开 → 星球扩张
+    gest.name='🖐 扩张';gest.color='#ff9944';
+    expandTarget=2.5;rotTarget=0.55;morphTarget=0;
+  }else if(cnt===1&&held>300){
+    // ☝ 单指 → 银河螺旋
+    gest.name='🌌 银河';gest.color='#55aaff';
+    expandTarget=1.8;rotTarget=2.3;morphTarget=0;
+    layers[4].userData.galaxy=1;layers[5].userData.galaxy=1;
+  }else if(isTwo&&held>400){
+    // 💕 胜利 → 爱心
+    gest.name='💕 爱心';gest.color='#ff6699';
+    expandTarget=1.2;rotTarget=0.35;morphTarget=1;
+    spawnHearts(5);
+  }else if(gest.pinching&&!isTwo){
+    // 🤏 捏合 → 闪耀坍缩
+    gest.name='🤏 闪耀';gest.color='#ff3311';
+    expandTarget=0.25;rotTarget=2.5;morphTarget=0;
+  }else if(held>700){
+    // 待机：需保持 0.7s 才生效，优先让其他手势响应
+    gest.name='👋 待机';gest.color='#aaa';
+    expandTarget=1.0;rotTarget=0.45;morphTarget=0;
+  }
+  // 切换手势时距离缩放复位 + 指示环闪烁
+  if(gest.name!==prevName){stateRing.material.opacity=0.9;distScaleTarget=1.0;}
+}
+
+// ── 爱心粒子系统 ──
+const HEART_MAX=800;
+const heartPos=new Float32Array(HEART_MAX*3);
+const heartCol=new Float32Array(HEART_MAX*3);
+const heartVel=new Float32Array(HEART_MAX*3);
+const heartLife=new Float32Array(HEART_MAX);
+const heartGeo=new THREE.BufferGeometry();
+heartGeo.setAttribute('position',new THREE.BufferAttribute(heartPos,3));
+heartGeo.setAttribute('color',new THREE.BufferAttribute(heartCol,3));
+const heartMat=new THREE.PointsMaterial({map:texWarm,size:0.07,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.8,vertexColors:true});
+const heartMesh=new THREE.Points(heartGeo,heartMat);
+heartGeo.setDrawRange(0,0);
+scene.add(heartMesh);
+let heartActive=0;
+
+// 预计算心形采样点
+const heartShape=[];
+for(let t=0;t<Math.PI*2;t+=0.12){
+  const sx=16*Math.pow(Math.sin(t),3),sy=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+  heartShape.push({x:sx*0.035,y:sy*0.035});
+}
+for(let i=0;i<120;i++){
+  const rx=(Math.random()-0.5)*0.85,ry=(Math.random()-0.5)*0.75;
+  if(Math.hypot(rx/0.06,ry/0.07)<0.55||(rx>-0.15&&rx<0.15&&ry>-0.2&&ry<0.3))heartShape.push({x:rx*0.06,y:ry*0.07});
+}
+
+function spawnHearts(count){
+  for(let h=0;h<count;h++){
+    if(heartActive+heartShape.length>HEART_MAX)break;
+    const cx=(Math.random()-0.5)*3,cy=(Math.random()-0.5)*2,cz=(Math.random()-0.5)*1.5;
+    const hue=0.93+Math.random()*0.07; // 粉色
+    for(const pt of heartShape){
+      const i=heartActive++;
+      heartPos[i*3]=cx+pt.x;heartPos[i*3+1]=cy+pt.y;heartPos[i*3+2]=cz+(Math.random()-0.5)*0.3;
+      heartVel[i*3]=(Math.random()-0.5)*0.8;heartVel[i*3+1]=1.2+Math.random()*1.5;heartVel[i*3+2]=(Math.random()-0.5)*0.5;
+      heartCol[i*3]=1;heartCol[i*3+1]=0.35+Math.random()*0.2;heartCol[i*3+2]=0.45+Math.random()*0.2;
+      heartLife[i]=2.5+Math.random()*2;
+    }
+  }
+}
+
+let _camStarted=false,_camLoop=0;
+async function startCam(){
+  if(_camStarted)return;_camStarted=true;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    video.srcObject=stream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    await video.play();
+    hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.7,minTrackingConfidence:0.5});
+    hands.onResults(onHandResults);
+    // 用自己的 rAF 循环送帧，等上一帧处理完再发下一帧
+    let _sending=false;
+    async function sendFrame(){
+      _camLoop=requestAnimationFrame(sendFrame);
+      if(video.readyState>=2&&!_sending){
+        _sending=true;
+        try{await hands.send({image:video});}catch(e){}
+        _sending=false;
+      }
+    }
+    sendFrame();
+  }catch(e){console.error('摄像头失败:',e.message);_camStarted=false;}
+}
+
+// ============================================================
+// FPS
+// ============================================================
+let fpsFrames=0,fpsTime=0,currentFPS=60;
+
+// ============================================================
+// 主循环
+// ============================================================
+const clock=new THREE.Clock();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),0.1);
+  const time=performance.now()*0.001;
+
+  // FPS
+  fpsFrames++;fpsTime+=dt;
+  if(fpsTime>=0.5){currentFPS=Math.round(fpsFrames/fpsTime);fpsFrames=0;fpsTime=0;}
+
+  // ── 5秒无手部检测自动回中 ──
+  if(performance.now()-_lastPointTime>5000&&(Math.abs(planetTX)>0.1||Math.abs(planetTY)>0.1)){
+    planetTX=0;planetTY=0;distScaleTarget=1.0;
+  }
+
+  // ── 星球位置平滑跟随（加快响应） ──
+  planetOX+=(planetTX-planetOX)*0.14;
+  planetOY+=(planetTY-planetOY)*0.14;
+
+  updateAllLayers(time,dt);
+
+  // ── 扩张指示环（跟随星球位置） ──
+  stateRing.position.set(planetOX,planetOY,0);
+  const ringSize=2.5+expandCurrent*2.0;
+  stateRing.scale.lerp(new THREE.Vector3(ringSize,ringSize,1),0.12);
+  stateRing.material.opacity+=(0.4-stateRing.material.opacity)*0.1;
+  const ringCol=gest.name.includes('扩张')?0xff8844:gest.name.includes('银河')?0x4499ff:gest.name.includes('爱心')?0xff6699:gest.name.includes('闪耀')?0xff2200:0x889999;
+  stateRing.material.color.set(ringCol);
+
+  // ── 核心光晕（跟随） ──
+  coreGlow.position.set(planetOX,planetOY,0);
+  const glowT=gest.name.includes('闪耀')?0.6:gest.name.includes('银河')?0.35:gest.name.includes('爱心')?0.4:0.1;
+  coreGlow.material.opacity+=(glowT-coreGlow.material.opacity)*0.08;
+  coreGlow.material.color.set(gest.name.includes('爱心')?0xff6699:gest.name.includes('银河')?0x55aaff:gest.name.includes('闪耀')?0xff4422:0xffaa44);
+  coreGlow.scale.lerp(new THREE.Vector3(gest.name.includes('闪耀')?1.5:gest.name.includes('爱心')?4:gest.name.includes('银河')?5:3.5,gest.name.includes('闪耀')?1.5:gest.name.includes('爱心')?4:gest.name.includes('银河')?5:3.5,1),0.1);
+
+  // ── 爱心粒子更新 ──
+  for(let i=heartActive-1;i>=0;i--){
+    heartLife[i]-=dt;
+    if(heartLife[i]<=0){
+      const last=heartActive-1;
+      if(i!==last){
+        heartPos[i*3]=heartPos[last*3];heartPos[i*3+1]=heartPos[last*3+1];heartPos[i*3+2]=heartPos[last*3+2];
+        heartVel[i*3]=heartVel[last*3];heartVel[i*3+1]=heartVel[last*3+1];heartVel[i*3+2]=heartVel[last*3+2];
+        heartCol[i*3]=heartCol[last*3];heartCol[i*3+1]=heartCol[last*3+1];heartCol[i*3+2]=heartCol[last*3+2];
+        heartLife[i]=heartLife[last];
+      }
+      heartActive--;
+    }else{
+      heartPos[i*3]+=heartVel[i*3]*dt;
+      heartPos[i*3+1]+=heartVel[i*3+1]*dt;
+      heartPos[i*3+2]+=heartVel[i*3+2]*dt;
+      heartVel[i*3+1]+=0.3*dt; // 微重力
+      heartCol[i*3+1]=Math.max(0.2,heartCol[i*3+1]-dt*0.2);
+      heartCol[i*3+2]=Math.max(0.2,heartCol[i*3+2]-dt*0.15);
+    }
+  }
+  heartGeo.setDrawRange(0,heartActive);
+  heartGeo.attributes.position.needsUpdate=true;
+  heartGeo.attributes.color.needsUpdate=true;
+
+  // 更新UI
+  document.getElementById('gesture-name').textContent=gest.name;
+  document.getElementById('gesture-name').style.color=gest.color;
+  const el=document.getElementById('fps-display');
+  el.textContent=`FPS ${currentFPS}`;
+  el.className=currentFPS<35?'warn':'';
+
+  renderer.render(scene,camera);
+}
+
+// ============================================================
+// UI 事件
+// ============================================================
+document.getElementById('fs-btn').addEventListener('click',()=>{
+  document.fullscreenElement?document.exitFullscreen():document.body.requestFullscreen().catch(()=>{});
+});
+
+document.getElementById('sld-count').addEventListener('input',function(){
+  const total=parseInt(this.value);
+  document.getElementById('v-count').textContent=total;
+  // 按比例分配到各层
+  const ratios=[0.30,0.20,0.17,0.13,0.12,0.08];
+  for(let i=0;i<6;i++){
+    setLayerCount(i,Math.floor(total*ratios[i]));
+  }
+  // 更新颜色
+  for(let i=0;i<6;i++)updateLayerColors(i);
+});
+
+document.getElementById('sld-expand').addEventListener('input',function(){
+  document.getElementById('v-expand').textContent=parseFloat(this.value).toFixed(1);
+});
+
+document.getElementById('btn-color').addEventListener('click',()=>{
+  switchTheme();
+});
+
+// 面板自动变暗
+let dimTimer;
+document.getElementById('panel').addEventListener('mouseenter',function(){
+  this.classList.remove('dim');clearTimeout(dimTimer);
+});
+document.getElementById('panel').addEventListener('mouseleave',function(){
+  dimTimer=setTimeout(()=>this.classList.add('dim'),2000);
+});
+
+// ============================================================
+// 窗口自适应
+// ============================================================
+window.addEventListener('resize',()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+
+// ============================================================
+// 启动
+// ============================================================
+startCam();
+animate();
+window.addEventListener('beforeunload',()=>{
+  if(_camLoop)cancelAnimationFrame(_camLoop);
+  if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
+});
+</script>
+</body>
+</html>

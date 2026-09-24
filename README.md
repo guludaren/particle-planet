@@ -4,6 +4,8 @@
 
 **English summary** — A single-file, dependency-light web page that turns your webcam into a 3D controller. MediaPipe Hands tracks **21 hand landmarks locally in the browser (WASM)**; hand-written geometry (not a trained classifier) turns five gestures into changes in planet shape, colour and motion. **Nothing is uploaded, nothing is stored** — there is no backend, no model API and no API key. Open `index.html` and it just runs.
 
+**▶ 在线体验：<https://guludaren.github.io/particle-planet/>**（需要摄像头权限与联网加载 CDN）
+
 ---
 
 ## 运行方式
@@ -26,11 +28,11 @@ python -m http.server 8000
 
 然后浏览器访问 <http://localhost:8000>。经过 HTTP 协议加载时摄像头授权最稳定。任何静态服务器都可以（`npx serve`、VS Code Live Server 等）。
 
-### 3. 部署到 GitHub Pages
+### 3. 在线体验（GitHub Pages）
 
-把本仓库推到 GitHub，在 **Settings → Pages** 中选择从分支（如 `main` / 根目录）发布即可。
+本仓库已开启 GitHub Pages，**打开就能玩**：<https://guludaren.github.io/particle-planet/>
 
-由于入口文件已更名为 `index.html`，GitHub Pages 会自动以它作为首页。
+自己部署一份：把仓库推到你的 GitHub，在 **Settings → Pages** 中选择从分支（如 `main` / 根目录）发布即可。由于入口文件已更名为 `index.html`，Pages 会自动以它作为首页。
 
 > **关于文件名**：原始文件名是 **`星球.html`**，为了兼容 GitHub Pages 和各类静态服务器自动识别的入口约定，发布时复制并重命名为 `index.html`，文件内容完全一致（逐字节相同）。如果你更喜欢原名，直接改名回 `星球.html` 也能正常使用，只是需要手动在网址里指明文件名。
 
